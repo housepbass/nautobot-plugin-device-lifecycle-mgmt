@@ -14,12 +14,15 @@ from nautobot.dcim.models import (
 )
 from nautobot.extras.models.roles import Role
 from nautobot.dcim.models.locations import Location, LocationType
+from nautobot.dcim.filters import DeviceFilterSet
 
 from nautobot_device_lifecycle_mgmt.models import SoftwareLCM
 from nautobot_device_lifecycle_mgmt.models import SoftwareImageLCM
 
 from nautobot_plugin_nornir.constants import NORNIR_SETTINGS
 from nautobot_plugin_nornir.plugins.inventory.nautobot_orm import NautobotORMInventory
+
+from nornir_nautobot.exceptions import NornirNautobotException
 
 from nornir import InitNornir
 from nornir.core.inventory import Host
@@ -34,11 +37,66 @@ name = "Testing"
 
 InventoryPluginRegister.register("nautobot-inventory", NautobotORMInventory)
 
+FIELDS_PK = {
+    "platform",
+    "tenant_group",
+    "tenant",
+    "location",
+    "role",
+    "rack",
+    "rack_group",
+    "manufacturer",
+    "device_type",
+    #"device",
+}
+
+FIELDS_NAME = {"tags", "status"}
+
+
+def get_job_filter(data=None):
+    """Helper function to return a list of devices based on form inputs."""
+    if not data:
+        data = {}
+    query = {}
+
+    # Translate instances from FIELDS set to list of primary keys
+    for field in FIELDS_PK:
+        if data.get(field):
+            query[field] = data[field].values_list("pk", flat=True)
+
+    # Translate instances from FIELDS set to list of names
+    for field in FIELDS_NAME:
+        if data.get(field):
+            query[field] = data[field].values_list("name", flat=True)
+
+    # Not sure about this, maybe need to handle devices differently?
+    # Handle case where object is from single device run all.
+    if data.get("device") and isinstance(data["device"], Device):
+        query.update({"id": [str(data["device"].pk)]})
+    elif data.get("device"):
+        query.update({"id": data["device"].values_list("pk", flat=True)})
+
+    devices_filtered = DeviceFilterSet(data=query)
+
+    devices_no_platform = devices_filtered.qs.filter(platform__isnull=True)
+    if devices_no_platform.exists():
+        raise NornirNautobotException(
+            f"`E3017:` The following device(s) {', '.join([device.name for device in devices_no_platform])} have no platform defined. Platform is required."
+        )
+
+    devices_no_primary_ip = devices_filtered.qs.filter(primary_ip4__isnull=True)
+    if devices_no_primary_ip.exists():
+        raise NornirNautobotException(
+            f"The following device(s) {', '.join([device.name for device in devices_no_primary_ip])} have no primary IP address defined. A primary IP is required."
+        )
+
+    return devices_filtered.qs
+
 
 def init_nornir(data) -> InitNornir:
     """Initialise Nornir object."""
         
-    device_qs = Device.objects.all()
+    #device_qs = Device.objects.all()
     return InitNornir(
         runner=NORNIR_SETTINGS.get("runner"),
         logging={"enabled": False},
@@ -48,7 +106,7 @@ def init_nornir(data) -> InitNornir:
             "options": {
                 "credentials_class": NORNIR_SETTINGS.get("credentials"),
                 "params": NORNIR_SETTINGS.get("inventory_params"),
-                "queryset": device_qs,
+                "queryset": get_job_filter(data),
                 #"queryset": Device.objects.all()
             },
         },
@@ -95,7 +153,6 @@ class CreateSoftwareRel(Job, FormEntry):
     def run(self, *args, **data) -> None:
         """Run get os version job."""
         # Init Nornir and run build_software_rel task for each device
-
         try:
             with init_nornir(data) as nornir_obj:
                 nr = nornir_obj
