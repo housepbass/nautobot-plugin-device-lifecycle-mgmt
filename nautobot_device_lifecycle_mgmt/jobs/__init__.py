@@ -9,6 +9,6 @@ jobs = [
     DeviceSoftwareValidationFullReport,
     InventoryItemSoftwareValidationFullReport,
     GenerateVulnerabilities,
-    CreateSoftwareRel
+    CreateSoftwareRel,
 ]
 register_jobs(*jobs)

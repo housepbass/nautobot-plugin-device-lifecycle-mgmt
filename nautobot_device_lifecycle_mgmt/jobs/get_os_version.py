@@ -1,7 +1,8 @@
 from django.contrib.contenttypes.models import ContentType
 
+from nautobot.extras.choices import LogLevelChoices
 from nautobot.tenancy.models import Tenant, TenantGroup
-from nautobot.extras.jobs import Job, ObjectVar, MultiObjectVar, BooleanVar, TextVar
+from nautobot.extras.jobs import Job, MultiObjectVar, BooleanVar
 from nautobot.extras.models import Tag, Relationship, RelationshipAssociation
 from nautobot.extras.models.statuses import Status
 from nautobot.dcim.models import (
@@ -13,11 +14,10 @@ from nautobot.dcim.models import (
     RackGroup,
 )
 from nautobot.extras.models.roles import Role
-from nautobot.dcim.models.locations import Location, LocationType
+from nautobot.dcim.models.locations import Location
 from nautobot.dcim.filters import DeviceFilterSet
 
 from nautobot_device_lifecycle_mgmt.models import SoftwareLCM
-from nautobot_device_lifecycle_mgmt.models import SoftwareImageLCM
 
 from nautobot_plugin_nornir.constants import NORNIR_SETTINGS
 from nautobot_plugin_nornir.plugins.inventory.nautobot_orm import NautobotORMInventory
@@ -30,10 +30,7 @@ from nornir.core.plugins.inventory import InventoryPluginRegister
 from nornir.core.task import AggregatedResult, MultiResult, Result, Task
 from nornir_napalm.plugins.tasks import napalm_get
 
-# Need to replicate this functionality
-# from nautobot_golden_config.utilities.helper import get_job_filter
-
-name = "Testing"
+name = "Device/Software Lifecycle Reporting"
 
 InventoryPluginRegister.register("nautobot-inventory", NautobotORMInventory)
 
@@ -47,7 +44,7 @@ FIELDS_PK = {
     "rack_group",
     "manufacturer",
     "device_type",
-    #"device",
+    # "device",
 }
 
 FIELDS_NAME = {"tags", "status"}
@@ -70,7 +67,6 @@ def get_job_filter(data=None):
             query[field] = data[field].values_list("name", flat=True)
 
     # Not sure about this, maybe need to handle devices differently?
-    # Handle case where object is from single device run all.
     if data.get("device") and isinstance(data["device"], Device):
         query.update({"id": [str(data["device"].pk)]})
     elif data.get("device"):
@@ -95,19 +91,17 @@ def get_job_filter(data=None):
 
 def init_nornir(data) -> InitNornir:
     """Initialise Nornir object."""
-        
-    #device_qs = Device.objects.all()
+
+    # device_qs = Device.objects.all()
     return InitNornir(
         runner=NORNIR_SETTINGS.get("runner"),
         logging={"enabled": False},
-        # dry_run=data["dry_run"],
         inventory={
             "plugin": "nautobot-inventory",
             "options": {
                 "credentials_class": NORNIR_SETTINGS.get("credentials"),
                 "params": NORNIR_SETTINGS.get("inventory_params"),
                 "queryset": get_job_filter(data),
-                #"queryset": Device.objects.all()
             },
         },
     )
@@ -150,14 +144,13 @@ class CreateSoftwareRel(Job, FormEntry):
         read_only = False
         has_sensitive_variables = False
 
-    def run(self, *args, **data) -> None:
+    def run(self, **data) -> None:
         """Run get os version job."""
         # Init Nornir and run build_software_rel task for each device
         try:
             with init_nornir(data) as nornir_obj:
                 nr = nornir_obj
                 nr.run(
-                    #task=self.get_os_version,
                     task=self.create_software_to_device_rel,
                     name=self.name,
                 )
@@ -170,24 +163,28 @@ class CreateSoftwareRel(Job, FormEntry):
         try:
             return task.run(task=napalm_get, getters="get_facts").result["get_facts"]["os_version"]
         except Exception as err:
-            self.logger.error(f"{err}")
+            self.job_result.log(level_choice=LogLevelChoices.LOG_ERROR, message=f"{err}")
 
     def get_or_create_software_obj(self, os_version, device_obj):
         """Get or create SoftwareLCM object for device."""
         software_obj = SoftwareLCM.objects.get_or_create(version=os_version, device_platform=device_obj.platform)
-        if not software_obj[1]:
-            self.logger.info(f"Created software {software_obj[0].version} for {software_obj[0].device_platform}.")
+        # if not software_obj[1]:
+        # self.job_result.log(level_choice=LogLevelChoices.LOG_INFO, message=f"Created software {software_obj[0].version} for {software_obj[0].device_platform}.")
         return software_obj[0]
-            
+
     def create_rel(self, software_obj, device_obj):
         """Create relationship between device and software objects."""
         software_rel_obj = Relationship.objects.get(key="device_soft")
 
         # Does it already have a relationship to the correct software
-        intended_rel = RelationshipAssociation.objects.filter(relationship=software_rel_obj, destination_id=device_obj.id, source_id=software_obj.id)
+        intended_rel = RelationshipAssociation.objects.filter(
+            relationship=software_rel_obj, destination_id=device_obj.id, source_id=software_obj.id
+        )
         if not intended_rel.exists():
             # Does it have a relationship to some other (non-correct) software
-            actual_rel = RelationshipAssociation.objects.filter(relationship=software_rel_obj, destination_id=device_obj.id)
+            actual_rel = RelationshipAssociation.objects.filter(
+                relationship=software_rel_obj, destination_id=device_obj.id
+            )
             if actual_rel.exists():
                 actual_rel.delete()
             # Create intended relationship
@@ -200,11 +197,18 @@ class CreateSoftwareRel(Job, FormEntry):
                 destination_type=dest_ct,
                 destination=device_obj,
             )
-            self.logger.info(f"Created relationship: {created_rel}.")
+            self.job_result.log(
+                level_choice=LogLevelChoices.LOG_INFO,
+                obj=device_obj,
+                message=f"Created relationship: {created_rel}.",
+            )
             return
 
-        self.logger.info(f"Correct relationship exists: {intended_rel}.")
-
+        self.job_result.log(
+            level_choice=LogLevelChoices.LOG_INFO,
+            obj=device_obj,
+            message=f"Correct software relationship already exists for {device_obj}.",
+        )
 
     def create_software_to_device_rel(self, task):
         """Create relationship between Device and Software objects in LCM."""
