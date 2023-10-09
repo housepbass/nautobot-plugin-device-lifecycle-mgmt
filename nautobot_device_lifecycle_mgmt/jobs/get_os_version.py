@@ -1,3 +1,5 @@
+"""Create device <-> Software relationships using nornir-napalm."""
+
 from django.contrib.contenttypes.models import ContentType
 
 from nautobot.extras.choices import LogLevelChoices
@@ -17,20 +19,19 @@ from nautobot.extras.models.roles import Role
 from nautobot.dcim.models.locations import Location
 from nautobot.dcim.filters import DeviceFilterSet
 
-from nautobot_device_lifecycle_mgmt.models import SoftwareLCM
-
 from nautobot_plugin_nornir.constants import NORNIR_SETTINGS
 from nautobot_plugin_nornir.plugins.inventory.nautobot_orm import NautobotORMInventory
 
 from nornir_nautobot.exceptions import NornirNautobotException
 
 from nornir import InitNornir
-from nornir.core.inventory import Host
 from nornir.core.plugins.inventory import InventoryPluginRegister
-from nornir.core.task import AggregatedResult, MultiResult, Result, Task
+from nornir.core.exceptions import NornirSubTaskError
 from nornir_napalm.plugins.tasks import napalm_get
 
-name = "Device/Software Lifecycle Reporting"
+from nautobot_device_lifecycle_mgmt.models import SoftwareLCM
+
+name = "Device/Software Lifecycle Reporting" # pylint: disable=invalid-name
 
 InventoryPluginRegister.register("nautobot-inventory", NautobotORMInventory)
 
@@ -91,8 +92,6 @@ def get_job_filter(data=None):
 
 def init_nornir(data) -> InitNornir:
     """Initialise Nornir object."""
-
-    # device_qs = Device.objects.all()
     return InitNornir(
         runner=NORNIR_SETTINGS.get("runner"),
         logging={"enabled": False},
@@ -144,33 +143,15 @@ class CreateSoftwareRel(Job, FormEntry):
         read_only = False
         has_sensitive_variables = False
 
-    def run(self, **data) -> None:
+    def run(self, **data): # pylint: disable=arguments-differ
         """Run get os version job."""
         # Init Nornir and run build_software_rel task for each device
-        try:
-            with init_nornir(data) as nornir_obj:
-                nr = nornir_obj
-                nr.run(
-                    task=self.create_software_to_device_rel,
-                    name=self.name,
-                )
-        except Exception as err:
-            self.logger.debug(f"```\n{err}\n```")
-            raise
-
-    def get_os_version(self, task: Task, device_obj) -> str:
-        """Get os_version from device via nornir-napalm."""
-        try:
-            return task.run(task=napalm_get, getters="get_facts").result["get_facts"]["os_version"]
-        except Exception as err:
-            self.job_result.log(level_choice=LogLevelChoices.LOG_ERROR, message=f"{err}")
-
-    def get_or_create_software_obj(self, os_version, device_obj):
-        """Get or create SoftwareLCM object for device."""
-        software_obj = SoftwareLCM.objects.get_or_create(version=os_version, device_platform=device_obj.platform)
-        # if not software_obj[1]:
-        # self.job_result.log(level_choice=LogLevelChoices.LOG_INFO, message=f"Created software {software_obj[0].version} for {software_obj[0].device_platform}.")
-        return software_obj[0]
+        with init_nornir(data) as nornir_obj:
+            nr = nornir_obj
+            nr.run(
+                task=self.create_software_to_device_rel,
+                name=self.name,
+            )
 
     def create_rel(self, software_obj, device_obj):
         """Create relationship between device and software objects."""
@@ -213,7 +194,18 @@ class CreateSoftwareRel(Job, FormEntry):
     def create_software_to_device_rel(self, task):
         """Create relationship between Device and Software objects in LCM."""
         device_obj = task.host.data["obj"]
+        try:
+            os_version = task.run(task=napalm_get, getters="get_facts").result["get_facts"]["os_version"]
+        except NornirSubTaskError as error:
+            self.job_result.log(
+                level_choice=LogLevelChoices.LOG_ERROR,
+                obj=device_obj,
+                message=error,
+            )
+            raise
 
-        os_version = self.get_os_version(task, device_obj)
-        software_obj = self.get_or_create_software_obj(os_version, device_obj)
+        software_obj = SoftwareLCM.objects.get_or_create(
+            version=os_version,
+            device_platform=device_obj.platform
+        )[0]
         self.create_rel(software_obj, device_obj)
