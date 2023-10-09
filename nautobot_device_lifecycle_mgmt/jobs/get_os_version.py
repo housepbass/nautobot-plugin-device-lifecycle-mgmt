@@ -2,7 +2,7 @@
 
 from django.contrib.contenttypes.models import ContentType
 
-from nautobot.extras.choices import LogLevelChoices
+from nautobot.extras.choices import LogLevelChoices, JobResultStatusChoices
 from nautobot.tenancy.models import Tenant, TenantGroup
 from nautobot.extras.jobs import Job, MultiObjectVar, BooleanVar
 from nautobot.extras.models import Tag, Relationship, RelationshipAssociation
@@ -194,6 +194,7 @@ class CreateSoftwareRel(Job, FormEntry):
     def create_software_to_device_rel(self, task):
         """Create relationship between Device and Software objects in LCM."""
         device_obj = task.host.data["obj"]
+        # Get OS from device
         try:
             os_version = task.run(task=napalm_get, getters="get_facts").result["get_facts"]["os_version"]
         except NornirSubTaskError as error:
@@ -202,10 +203,13 @@ class CreateSoftwareRel(Job, FormEntry):
                 obj=device_obj,
                 message=error,
             )
+            # Currently doesn't work
+            self.job_result.status = JobResultStatusChoices.STATUS_FAILURE
             raise
-
+        # Get or create SoftwareLCM for Device OS
         software_obj = SoftwareLCM.objects.get_or_create(
             version=os_version,
             device_platform=device_obj.platform
         )[0]
+        # Create Device to Software relationship
         self.create_rel(software_obj, device_obj)
