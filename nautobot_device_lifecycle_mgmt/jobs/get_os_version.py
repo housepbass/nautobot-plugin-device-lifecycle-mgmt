@@ -207,9 +207,9 @@ class CreateSoftwareRel(Job, FormEntry):
             self.job_result.status = JobResultStatusChoices.STATUS_FAILURE
             raise
         # Get or create SoftwareLCM for Device OS
-        software_obj = SoftwareLCM.objects.get_or_create(
+        software_obj, _ = SoftwareLCM.objects.get_or_create(
             version=os_version,
             device_platform=device_obj.platform
-        )[0]
+        )
         # Create Device to Software relationship
         self.create_rel(software_obj, device_obj)
